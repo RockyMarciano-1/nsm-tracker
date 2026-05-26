@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="NSM 런닝"/>
+  <meta name="theme-color" content="#0A0A0A"/>
+  <title>NSM 런닝 트레이닝 로그</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%;background:#0A0A0A;color:#E0E0E0}
+    #root{height:100%}
+    ::-webkit-scrollbar{display:none}
+    body{-webkit-tap-highlight-color:transparent}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">
+const{useState,useRef,useEffect}=React;
+
+// ── 상수 ──────────────────────────────────────────────────────────────────────
+const STORAGE_KEY="nsm_weeks_v3",PLAN_KEY="nsm_plan_v3",GH_KEY="nsm_github";
+const DEFAULT_PLAN=[
+  {day:"월",type:"quality",label:"퀄리티",icon:"⚡",warmupMin:15,cooldownMin:10,sets:3,setMin:10,restSec:60,targetPaceMin:"6:20",targetPaceMax:"6:40"},
+  {day:"화",type:"easy",label:"이지런",icon:"🌿",totalMin:40,targetPaceMin:"7:30",targetPaceMax:"8:30"},
+  {day:"수",type:"quality",label:"퀄리티",icon:"⚡",warmupMin:15,cooldownMin:10,sets:5,setMin:6,restSec:60,targetPaceMin:"6:05",targetPaceMax:"6:20"},
+  {day:"목",type:"easy",label:"이지런",icon:"🌿",totalMin:40,targetPaceMin:"7:30",targetPaceMax:"8:30"},
+  {day:"금",type:"quality",label:"퀄리티",icon:"⚡",warmupMin:15,cooldownMin:10,sets:8,setMin:3,restSec:60,targetPaceMin:"5:50",targetPaceMax:"6:05"},
+  {day:"토",type:"long",label:"롱런",icon:"🏃",totalMin:70,targetPaceMin:"8:00",targetPaceMax:"8:30"},
+  {day:"일",type:"rest",label:"휴식",icon:"😴",totalMin:0,targetPaceMin:"—",targetPaceMax:""},
+];
+const DAYS_KO=["월","화","수","목","금","토","일"];
+const TC={quality:"#E8572A",easy:"#3DBFA0",long:"#5BA4CF",rest:"#444"};
+const TL={quality:"퀄리티",easy:"이지런",long:"롱런",rest:"휴식"};
+const TI={quality:"⚡",easy:"🌿",long:"🏃",rest:"😴"};
+const COND=[{v:5,l:"최상",e:"🔥"},{v:4,l:"좋음",e:"😊"},{v:3,l:"보통",e:"😐"},{v:2,l:"피곤",e:"😓"},{v:1,l:"힘듦",e:"😩"}];
+const S={xs:12,sm:14,md:16,lg:18,xl:22};
+
+// ── 유틸 ──────────────────────────────────────────────────────────────────────
+const getMon=d=>{const x=new Date(d),w=x.getDay();x.setDate(x.getDate()-(w===0?6:w-1));x.setHours(0,0,0,0);return x};
+const toKey=d=>d.toISOString().slice(0,10);
+const weekKey=(off=0)=>{const m=getMon(new Date());m.setDate(m.getDate()+off*7);return toKey(m)};
+const weekDates=wk=>{const[y,mo,dd]=wk.split("-").map(Number),m=new Date(y,mo-1,dd);return Array.from({length:7},(_,i)=>{const d=new Date(m);d.setDate(d.getDate()+i);return d})};
+const lsGet=(k,fb)=>{try{return JSON.parse(localStorage.getItem(k)||"null")??fb}catch{return fb}};
+const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
+const condInfo=v=>COND.find(c=>c.v===v)||COND[2];
+const totalMin=p=>{if(p.type==="rest")return 0;if(p.type==="easy"||p.type==="long")return+p.totalMin||0;const w=+p.warmupMin||0,c=+p.cooldownMin||0,s=+p.sets||0,m=+p.setMin||0,r=+p.restSec||0;return w+c+s*m+Math.max(0,s-1)*Math.ceil(r/60)};
+const paceStr=p=>{if(!p.targetPaceMin||p.targetPaceMin==="—")return"—";if(!p.targetPaceMax)return p.targetPaceMin;return`${p.targetPaceMin}~${p.targetPaceMax}`};
+const planDesc=p=>{if(p.type==="rest")return"완전 휴식";if(p.type==="easy")return`편안한 조깅 ${p.totalMin||40}분`;if(p.type==="long")return`장거리 이지런 ${p.totalMin||70}분`;return`워밍업 ${p.warmupMin||15}분 + ${p.setMin||10}분×${p.sets||3}세트 (휴식 ${p.restSec||60}초) + 쿨다운 ${p.cooldownMin||10}분`};
+const p2s=s=>{if(!s)return null;const p=s.split(":").map(Number);return p.length===2?p[0]*60+(p[1]||0):null};
+const inRange=(pace,mn,mx)=>{const s=p2s(pace),lo=p2s(mn),hi=p2s(mx);if(s===null||lo===null||hi===null)return null;return s>=lo&&s<=hi};
+
+// ── GitHub API ────────────────────────────────────────────────────────────────
+async function ghGet(cfg){
+  try{
+    const r=await fetch(`https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`,
+      {headers:{Authorization:`token ${cfg.token}`,"Accept":"application/vnd.github.v3+json"}});
+    if(r.status===404)return{data:null,sha:null};
+    if(!r.ok)return null;
+    const j=await r.json();
+    return{data:JSON.parse(atob(j.content.replace(/\n/g,""))),sha:j.sha};
+  }catch{return null}
+}
+async function ghPut(cfg,payload,sha){
+  try{
+    const body={message:"NSM log update "+new Date().toISOString().slice(0,10),
+      content:btoa(unescape(encodeURIComponent(JSON.stringify(payload,null,2))))};
+    if(sha)body.sha=sha;
+    const r=await fetch(`https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`,
+      {method:"PUT",headers:{Authorization:`token ${cfg.token}`,"Content-Type":"application/json","Accept":"application/vnd.github.v3+json"},
+       body:JSON.stringify(body)});
+    if(!r.ok){const e=await r.json();return{ok:false,msg:e.message||"저장 실패"};}
+    const j=await r.json();
+    return{ok:true,sha:j.content.sha};
+  }catch(e){return{ok:false,msg:e.message}}
+}
+
+// ── GitHub 설정 모달 ──────────────────────────────────────────────────────────
+function GhModal({cfg,onSave,onClose,status}){
+  const[owner,setOwner]=useState(cfg.owner||"RockyMarciano-1");
+  const[repo,setRepo]=useState(cfg.repo||"nsm-tracker");
+  const[path,setPath]=useState(cfg.path||"data/log.json");
+  const[token,setToken]=useState(cfg.token||"");
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.9)",zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#141414",borderRadius:"20px 20px 0 0",border:"1px solid #222",borderBottom:"none",padding:"28px 20px 48px",width:"100%",maxWidth:480}}>
+        <div style={{width:40,height:5,background:"#333",borderRadius:3,margin:"0 auto 24px"}}/>
+        <div style={{fontSize:S.lg,fontWeight:700,color:"#E8E8E8",marginBottom:6}}>GitHub 저장 설정</div>
+        <div style={{fontSize:S.sm,color:"#666",marginBottom:20,lineHeight:1.6}}>
+          데이터를 GitHub 저장소에 저장합니다. Personal Access Token은 <b style={{color:"#aaa"}}>repo</b> 권한이 필요합니다.
+        </div>
+        {status&&<div style={{fontSize:S.sm,color:status.ok?"#3DBFA0":"#E8572A",marginBottom:14,padding:"10px 12px",background:status.ok?"#0d1f16":"#1f0d0d",borderRadius:8,border:`1px solid ${status.ok?"#1a4a2a":"#4a1a1a"}`}}>{status.ok?"✅ "+status.msg:"❌ "+status.msg}</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:20}}>
+          {[["저장소 소유자",owner,setOwner,"RockyMarciano-1"],
+            ["저장소 이름",repo,setRepo,"nsm-tracker"],
+            ["파일 경로",path,setPath,"data/log.json"],
+            ["Personal Access Token",token,setToken,"ghp_xxxx..."]
+          ].map(([lbl,val,set,ph])=>(
+            <div key={lbl}>
+              <div style={{fontSize:S.xs,color:"#666",marginBottom:5}}>{lbl}</div>
+              <input type={lbl.includes("Token")?"password":"text"} value={val} onChange={e=>set(e.target.value)} placeholder={ph}
+                style={{width:"100%",background:"#0e0e0e",border:"1px solid #1e1e1e",borderRadius:8,padding:"11px 12px",color:"#e0e0e0",fontSize:S.md,outline:"none",fontFamily:"monospace",boxSizing:"border-box"}}
+              />
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onClose} style={{flex:1,padding:14,borderRadius:10,border:"1px solid #333",background:"none",color:"#777",fontSize:S.md,cursor:"pointer"}}>취소</button>
+          <button onClick={()=>onSave({owner,repo,path,token})} style={{flex:2,padding:14,borderRadius:10,border:"none",background:"#E8572A",color:"#fff",fontWeight:700,fontSize:S.md,cursor:"pointer"}}>저장 & 연결</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 비교 행 ───────────────────────────────────────────────────────────────────
+function CompareRow({plan:p,rec}){
+  const done=rec?.done&&!rec?.skipped,skip=rec?.skipped;
+  const ir=done&&rec.pace?inRange(rec.pace,p.targetPaceMin,p.targetPaceMax):null;
+  const pc=ir===true?"#3DBFA0":ir===false?"#E8572A":"#888";
+  const pm=totalMin(p),rm=rec?.duration||null;
+  const dd=(done&&rm&&pm)?rm-pm:null;
+  if(p.type==="rest")return null;
+  return(
+    <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid #1e1e1e"}}>
+      <div style={{display:"flex",marginBottom:8,gap:4}}>
+        <div style={{flex:1,fontSize:S.xs,letterSpacing:2,color:"#555",textAlign:"center"}}>계획</div>
+        <div style={{width:1,background:"#1e1e1e"}}/>
+        <div style={{flex:1,fontSize:S.xs,letterSpacing:2,color:done?"#aaa":skip?"#555":"#444",textAlign:"center"}}>{skip?"⏭ 건너뜀":done?"실제":"미기록"}</div>
+      </div>
+      <CI label="페이스" pv={paceStr(p)==="—"?null:`${paceStr(p)}/km`} rv={done&&rec.pace?`${rec.pace}/km`:null} rc={pc} sfx={ir===true?" ✓":ir===false?" ▲":""} sk={skip}/>
+      <CI label="시간" pv={pm?`${pm}분`:null} rv={done&&rm?`${rm}분`:null} rsfx={dd!==null?(dd>0?` +${dd}분`:dd<0?` ${dd}분`:" ="):null} rc={dd===null||dd===0?"#3DBFA0":dd>0?"#5BA4CF":"#E8572A"} sk={skip}/>
+      {done&&rec.hr&&<CI label="심박수" pv="—" rv={`${rec.hr} bpm`} rc="#CF5B7A" sk={false}/>}
+      {done&&rec.dist&&<CI label="거리" pv="—" rv={`${rec.dist} km`} rc="#5BA4CF" sk={false}/>}
+      {done&&rec.condition&&<CI label="컨디션" pv="—" rv={`${condInfo(rec.condition).e} ${condInfo(rec.condition).l}`} rc="#A07CF5" sk={false}/>}
+      {done&&rec.memo&&<div style={{fontSize:S.sm,color:"#666",fontStyle:"italic",marginTop:8}}>"{rec.memo}"</div>}
+    </div>
+  );
+}
+function CI({label,pv,rv,rc,sfx,rsfx,sk}){
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:7}}>
+      <div style={{width:44,fontSize:S.xs,color:"#555",flexShrink:0}}>{label}</div>
+      <div style={{flex:1,fontSize:S.sm,fontFamily:"monospace",color:"#666",textAlign:"right",paddingRight:10}}>{pv||"—"}</div>
+      <div style={{width:1,background:"#1e1e1e",alignSelf:"stretch"}}/>
+      <div style={{flex:1,fontSize:S.sm,fontFamily:"monospace",color:sk?"#333":rc||"#888",textAlign:"left",paddingLeft:10}}>
+        {sk?"—":rv?`${rv}${sfx||""}${rsfx||""}`:<span style={{color:"#2a2a2a"}}>—</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── 주간 뷰 ───────────────────────────────────────────────────────────────────
+function WeekView({plan,logData,onLog,wk}){
+  const dates=weekDates(wk),today=new Date();today.setHours(0,0,0,0);
+  const days=logData?.[wk]||{};
+  const ent=Object.values(days).filter(d=>d.done&&!d.skipped);
+  const tm=ent.reduce((a,d)=>a+(d.duration||0),0),td=ent.reduce((a,d)=>a+(d.dist||0),0);
+  const hrs=ent.filter(d=>d.hr).map(d=>d.hr),ah=hrs.length?Math.round(hrs.reduce((a,b)=>a+b,0)/hrs.length):null;
+  return(
+    <div>
+      {ent.length>0&&(
+        <div style={{display:"flex",background:"#0f0f0f",border:"1px solid #1e1e1e",borderRadius:10,padding:"14px 0",marginBottom:16}}>
+          {[{l:"완료",v:`${ent.length}회`,c:"#3DBFA0"},{l:"총시간",v:tm?`${tm}분`:"—",c:"#5BA4CF"},{l:"총거리",v:td?`${td.toFixed(1)}km`:"—",c:"#E8572A"},{l:"평균심박",v:ah?`${ah}bpm`:"—",c:"#CF5B7A"}].map((s,i,a)=>(
+            <div key={i} style={{flex:1,textAlign:"center",borderRight:i<a.length-1?"1px solid #1e1e1e":"none"}}>
+              <div style={{fontSize:S.xl,fontWeight:700,color:s.c,fontFamily:"monospace"}}>{s.v}</div>
+              <div style={{fontSize:S.xs,color:"#555",marginTop:2}}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {plan.map((p,i)=>{
+        const date=dates[i],isToday=date&&date.getTime()===today.getTime();
+        const rec=days[i]||{},done=rec.done,tc=TC[p.type];
+        return(
+          <div key={i} onClick={()=>p.type!=="rest"&&onLog(i,wk)}
+            style={{background:"#111",border:`1px solid ${isToday&&!done?tc:"#1E1E1E"}`,borderLeft:`4px solid ${done&&!rec.skipped?"#2a2a2a":tc}`,borderRadius:10,padding:"16px",marginBottom:10,cursor:p.type==="rest"?"default":"pointer"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:48,height:48,borderRadius:"50%",flexShrink:0,background:`${tc}18`,border:`1px solid ${done&&!rec.skipped?"#2a2a2a":tc}`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.1}}>
+                <span style={{fontSize:S.md,fontWeight:700,color:done&&!rec.skipped?"#444":tc}}>{p.day}</span>
+                {date&&<span style={{fontSize:S.xs,color:done&&!rec.skipped?"#333":tc,opacity:.8}}>{date.getDate()}</span>}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+                  <span style={{fontSize:S.lg,fontWeight:700,color:done&&!rec.skipped?"#555":"#E8E8E8"}}>{p.icon} {p.label}</span>
+                  <span style={{fontSize:S.xs,padding:"3px 7px",borderRadius:4,background:`${tc}20`,color:done&&!rec.skipped?"#444":tc}}>{p.type.toUpperCase()}</span>
+                  {isToday&&!done&&<span style={{fontSize:S.xs,color:"#E8572A",border:"1px solid #E8572A",padding:"2px 7px",borderRadius:4}}>TODAY</span>}
+                </div>
+                <div style={{fontSize:S.sm,color:"#666"}}>{planDesc(p)}</div>
+                {p.type!=="rest"&&<div style={{fontSize:S.sm,color:"#555",marginTop:3}}>목표 {paceStr(p)}/km · {totalMin(p)}분</div>}
+              </div>
+              <div style={{flexShrink:0}}>
+                {done&&!rec.skipped?<span style={{fontSize:24}}>✅</span>:rec.skipped?<span style={{fontSize:24}}>⏭</span>:p.type!=="rest"?<span style={{fontSize:S.sm,color:tc,border:`1px solid ${tc}`,padding:"6px 12px",borderRadius:6}}>기록</span>:null}
+              </div>
+            </div>
+            <CompareRow plan={p} rec={rec}/>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── 캘린더 뷰 ─────────────────────────────────────────────────────────────────
+function CalView({plan,logData,onLog}){
+  const today=new Date();today.setHours(0,0,0,0);
+  const[yr,setYr]=useState(today.getFullYear());
+  const[mo,setMo]=useState(today.getMonth());
+  const prev=()=>{if(mo===0){setYr(y=>y-1);setMo(11);}else setMo(m=>m-1)};
+  const next=()=>{if(mo===11){setYr(y=>y+1);setMo(0);}else setMo(m=>m+1)};
+  const fd=new Date(yr,mo,1),sp=(fd.getDay()+6)%7,dim=new Date(yr,mo+1,0).getDate();
+  const cells=[...Array(sp).fill(null),...Array.from({length:dim},(_,i)=>new Date(yr,mo,i+1))];
+  function ci(date){const dow=(date.getDay()+6)%7,pi=plan[dow],m=getMon(date),wk=toKey(m),rc=logData?.[wk]?.[dow]||null;return{dow,pi,wk,rc,isTd:date.getTime()===today.getTime()}}
+  return(
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:18}}>
+        <button onClick={prev} style={{background:"none",border:"1px solid #2a2a2a",color:"#888",width:40,height:40,borderRadius:8,cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>‹</button>
+        <div style={{flex:1,textAlign:"center",fontSize:S.lg,fontWeight:700,color:"#E8E8E8"}}>{new Date(yr,mo,1).toLocaleDateString("ko-KR",{year:"numeric",month:"long"})}</div>
+        <button onClick={next} style={{background:"none",border:"1px solid #2a2a2a",color:"#888",width:40,height:40,borderRadius:8,cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>›</button>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
+        {DAYS_KO.map(d=><div key={d} style={{textAlign:"center",fontSize:S.sm,color:"#555",fontWeight:700,padding:"5px 0"}}>{d}</div>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
+        {cells.map((date,i)=>{
+          if(!date)return<div key={`p${i}`}/>;
+          const{dow,pi,wk,rc,isTd}=ci(date);
+          const tc=TC[pi.type],done=rc?.done&&!rc?.skipped,skip=rc?.skipped;
+          const ir=done&&rc.pace?inRange(rc.pace,pi.targetPaceMin,pi.targetPaceMax):null;
+          return(
+            <div key={i} onClick={()=>pi.type!=="rest"&&onLog(dow,wk)}
+              style={{background:done?`${tc}20`:"#111",border:`1px solid ${isTd?tc:done?`${tc}55`:"#1e1e1e"}`,borderRadius:8,padding:"6px 3px",cursor:pi.type==="rest"?"default":"pointer",minHeight:70,display:"flex",flexDirection:"column",alignItems:"center",gap:2,position:"relative"}}>
+              <div style={{fontSize:S.sm,fontWeight:700,color:isTd?tc:done?tc:"#666",lineHeight:1}}>{date.getDate()}</div>
+              <div style={{width:6,height:6,borderRadius:"50%",background:done?tc:skip?"#333":pi.type==="rest"?"#222":`${tc}55`}}/>
+              {pi.type!=="rest"&&<div style={{fontSize:18,lineHeight:1}}>{pi.icon}</div>}
+              {done&&rc.pace&&<div style={{fontSize:11,color:ir===false?"#E8572A":tc,fontFamily:"monospace",background:`${tc}18`,borderRadius:3,padding:"2px 3px",lineHeight:1.3,maxWidth:"100%",overflow:"hidden",textAlign:"center"}}>{rc.pace}</div>}
+              {skip&&<div style={{fontSize:S.xs,color:"#555"}}>⏭</div>}
+              {isTd&&<div style={{position:"absolute",inset:-1,borderRadius:8,border:`2px solid ${tc}`,pointerEvents:"none"}}/>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",marginTop:16,paddingTop:14,borderTop:"1px solid #1e1e1e"}}>
+        {Object.entries(TC).map(([t,c])=><div key={t} style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:10,height:10,borderRadius:"50%",background:c}}/><span style={{fontSize:S.sm,color:"#666"}}>{TL[t]}</span></div>)}
+      </div>
+    </div>
+  );
+}
+
+// ── 기록 모달 ─────────────────────────────────────────────────────────────────
+function LogModal({pi:p,di,wk,logData,onSave,onClose}){
+  const ex=logData?.[wk]?.[di]||{};
+  const[pace,setPace]=useState(ex.pace||"");
+  const[hr,setHr]=useState(ex.hr||"");
+  const[dist,setDist]=useState(ex.dist||"");
+  const[dur,setDur]=useState(ex.duration||totalMin(p)||"");
+  const[cond,setCond]=useState(ex.condition||3);
+  const[memo,setMemo]=useState(ex.memo||"");
+  const[skip,setSkip]=useState(ex.skipped||false);
+  const tc=TC[p.type];
+  const[y,m,dd]=wk.split("-").map(Number);
+  const dl=new Date(y,m-1,dd+di).toLocaleDateString("ko-KR",{month:"long",day:"numeric",weekday:"short"});
+  const save=()=>{onSave(di,wk,{done:true,skipped:skip,pace:pace||null,hr:hr?+hr:null,dist:dist?+dist:null,duration:dur?+dur:null,condition:cond,memo:memo||null,savedAt:new Date().toISOString()});onClose()};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.88)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#141414",borderRadius:"20px 20px 0 0",border:"1px solid #222",borderBottom:"none",padding:"28px 20px 48px",width:"100%",maxWidth:480,maxHeight:"92vh",overflowY:"auto"}}>
+        <div style={{width:40,height:5,background:"#333",borderRadius:3,margin:"0 auto 24px"}}/>
+        <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:20}}>
+          <div style={{width:52,height:52,borderRadius:"50%",background:`${tc}20`,border:`1.5px solid ${tc}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26}}>{p.icon}</div>
+          <div>
+            <div style={{fontSize:S.lg,fontWeight:700,color:"#E8E8E8"}}>{p.day}요일 · {p.label}</div>
+            <div style={{fontSize:S.sm,color:"#666",marginTop:2}}>{dl}</div>
+            <div style={{fontSize:S.sm,color:"#555",marginTop:1}}>{planDesc(p)}</div>
+          </div>
+        </div>
+        {p.type!=="rest"&&(
+          <div style={{background:"#0e0e0e",border:"1px solid #1e1e1e",borderRadius:10,padding:"12px 14px",marginBottom:16,display:"flex",gap:20,flexWrap:"wrap"}}>
+            <MC l="목표 페이스" v={`${paceStr(p)}/km`} c={tc}/>
+            <MC l="목표 시간" v={`${totalMin(p)}분`} c={tc}/>
+            {p.type==="quality"&&<MC l="세트" v={`${p.setMin||10}분×${p.sets||3}세트`} c={tc}/>}
+          </div>
+        )}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,padding:"14px 16px",background:skip?"#1a0a0a":"#0e0e0e",border:`1px solid ${skip?"#5a1a1a":"#1e1e1e"}`,borderRadius:10}}>
+          <span style={{fontSize:S.md,color:skip?"#CF5B7A":"#888"}}>{skip?"⏭ 이번 세션 건너뜀":"세션 완료"}</span>
+          <div onClick={()=>setSkip(s=>!s)} style={{width:50,height:28,borderRadius:14,background:skip?"#5a1a1a":"#1E8A6E",position:"relative",cursor:"pointer"}}>
+            <div style={{position:"absolute",top:4,left:skip?4:26,width:20,height:20,borderRadius:"50%",background:skip?"#CF5B7A":"#3DBFA0",transition:"left .2s"}}/>
+          </div>
+        </div>
+        {!skip&&(
+          <>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+              <Fld l="평균 페이스 (분:초/km)" ph="예: 6:25" v={pace} sv={setPace} hint={`목표: ${paceStr(p)}`} c="#E8572A"/>
+              <Fld l="평균 심박수 (bpm)" ph="예: 142" v={hr} sv={setHr} hint="Samsung Health 확인" c="#CF5B7A" t="number"/>
+              <Fld l="총 거리 (km)" ph="예: 8.5" v={dist} sv={setDist} c="#5BA4CF" t="number"/>
+              <Fld l="운동 시간 (분)" ph={`예: ${totalMin(p)}`} v={dur} sv={setDur} c="#3DBFA0" t="number"/>
+            </div>
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:S.sm,color:"#666",marginBottom:10}}>컨디션</div>
+              <div style={{display:"flex",gap:6}}>
+                {COND.map(c=>(
+                  <button key={c.v} onClick={()=>setCond(c.v)} style={{flex:1,padding:"10px 0",borderRadius:8,cursor:"pointer",background:cond===c.v?"#A07CF525":"#0e0e0e",border:`1px solid ${cond===c.v?"#A07CF5":"#1e1e1e"}`,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                    <span style={{fontSize:24}}>{c.e}</span>
+                    <span style={{fontSize:S.xs,color:cond===c.v?"#A07CF5":"#666"}}>{c.l}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{marginBottom:20}}>
+              <div style={{fontSize:S.sm,color:"#666",marginBottom:8}}>메모</div>
+              <textarea value={memo} onChange={e=>setMemo(e.target.value)} placeholder="오늘 훈련 소감, 몸 상태, 특이사항..." rows={3}
+                style={{width:"100%",background:"#0e0e0e",border:"1px solid #1e1e1e",borderRadius:10,padding:"12px 14px",color:"#ccc",fontSize:S.md,resize:"none",outline:"none",fontFamily:"inherit",boxSizing:"border-box",lineHeight:1.6}}/>
+            </div>
+          </>
+        )}
+        <button onClick={save} style={{width:"100%",padding:16,borderRadius:10,border:"none",background:tc,color:"#fff",fontWeight:700,fontSize:S.lg,cursor:"pointer"}}>저장</button>
+      </div>
+    </div>
+  );
+}
+function MC({l,v,c}){return(<div><div style={{fontSize:S.xs,color:"#555",marginBottom:3}}>{l}</div><div style={{fontSize:S.md,fontWeight:700,color:c,fontFamily:"monospace"}}>{v}</div></div>)}
+function Fld({l,ph,v,sv,hint,c,t="text"}){
+  return(
+    <div>
+      <div style={{fontSize:S.xs,color:"#666",marginBottom:5}}>{l}</div>
+      <input type={t} value={v} onChange={e=>sv(e.target.value)} placeholder={ph}
+        style={{width:"100%",background:"#0e0e0e",border:"1px solid #1e1e1e",borderRadius:8,padding:"10px 12px",color:"#e0e0e0",fontSize:S.md,outline:"none",fontFamily:"monospace",boxSizing:"border-box"}}
+        onFocus={e=>e.target.style.borderColor=c||"#444"} onBlur={e=>e.target.style.borderColor="#1e1e1e"}/>
+      {hint&&<div style={{fontSize:S.xs,color:"#444",marginTop:4}}>{hint}</div>}
+    </div>
+  );
+}
+
+// ── 플랜 편집 모달 ────────────────────────────────────────────────────────────
+function PlanModal({plan,onSave,onClose}){
+  const co=p=>{const{day,...r}=p;return{...r}};
+  const[ct,setCt]=useState(plan.map(p=>co(p)));
+  const[ei,setEi]=useState(null);
+  const dr=useRef(null),dro=useRef(null);
+  const upd=(i,k,v)=>setCt(prev=>prev.map((c,x)=>x===i?{...c,[k]:v}:c));
+  const ds=i=>{dr.current=i};
+  const dov=(e,i)=>{e.preventDefault();dro.current=i};
+  const drop=()=>{const f=dr.current,t=dro.current;if(f===null||t===null||f===t){dr.current=null;dro.current=null;return}setCt(prev=>{const n=[...prev],tmp=n[f];n[f]=n[t];n[t]=tmp;return n});dr.current=null;dro.current=null};
+  const save=()=>{onSave(ct.map((c,i)=>({...c,day:DAYS_KO[i],label:TL[c.type],icon:TI[c.type]})));onClose()};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.9)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#141414",borderRadius:"20px 20px 0 0",border:"1px solid #222",borderBottom:"none",padding:"20px 16px 48px",width:"100%",maxWidth:480,maxHeight:"92vh",overflowY:"auto"}}>
+        <div style={{width:40,height:5,background:"#333",borderRadius:3,margin:"0 auto 20px"}}/>
+        <div style={{fontSize:S.lg,fontWeight:700,color:"#E8E8E8",marginBottom:4}}>주간 플랜 편집</div>
+        <div style={{fontSize:S.sm,color:"#666",marginBottom:18}}>드래그로 세션 내용 이동 (요일 고정) · 탭으로 세부 수정</div>
+        {ct.map((c,i)=>{
+          const tc=TC[c.type],p={...c,day:DAYS_KO[i]};
+          return(
+            <div key={i} draggable onDragStart={()=>ds(i)} onDragOver={e=>dov(e,i)} onDrop={drop}
+              style={{background:ei===i?"#1a1a1a":"#111",border:`1px solid ${ei===i?tc:"#1e1e1e"}`,borderLeft:`4px solid ${tc}`,borderRadius:10,padding:"14px",marginBottom:8,cursor:"grab",userSelect:"none"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <div style={{width:44,height:44,borderRadius:"50%",background:`${tc}18`,border:`1px solid ${tc}`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.1,flexShrink:0}}>
+                  <span style={{fontSize:S.md,fontWeight:700,color:tc}}>{DAYS_KO[i]}</span>
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:S.md,fontWeight:700,color:"#ddd",marginBottom:3}}>{TI[c.type]} {TL[c.type]} <span style={{marginLeft:6,fontSize:S.xs,background:`${tc}20`,color:tc,padding:"2px 6px",borderRadius:4}}>{c.type.toUpperCase()}</span></div>
+                  <div style={{fontSize:S.sm,color:"#666"}}>{planDesc(p)} · {totalMin(p)}분</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+                  <button onClick={()=>setEi(ei===i?null:i)} style={{background:"none",border:`1px solid ${ei===i?tc:"#333"}`,color:ei===i?tc:"#777",padding:"6px 12px",borderRadius:6,cursor:"pointer",fontSize:S.sm}}>{ei===i?"닫기":"편집"}</button>
+                  <span style={{color:"#444",fontSize:20}}>⠿</span>
+                </div>
+              </div>
+              {ei===i&&(
+                <div style={{marginTop:16,paddingTop:16,borderTop:"1px solid #1e1e1e"}}>
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:S.sm,color:"#666",marginBottom:8}}>세션 종류</div>
+                    <div style={{display:"flex",gap:6}}>
+                      {Object.entries(TL).map(([t,l])=>(
+                        <button key={t} onClick={()=>upd(i,"type",t)} style={{flex:1,padding:"10px 0",borderRadius:8,cursor:"pointer",background:c.type===t?`${TC[t]}20`:"#0e0e0e",border:`1px solid ${c.type===t?TC[t]:"#1e1e1e"}`,color:c.type===t?TC[t]:"#666",fontSize:S.sm}}>
+                          <div style={{fontSize:22}}>{TI[t]}</div><div style={{fontSize:S.xs,marginTop:2}}>{l}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {c.type==="quality"&&(
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+                      {[["워밍업 (분)","warmupMin",15],["세트 수","sets",3],["세트당 (분)","setMin",10],["휴식 (초)","restSec",60],["쿨다운 (분)","cooldownMin",10]].map(([l,k,d])=>(
+                        <SF key={k} l={l} v={c[k]??d} onChange={v=>upd(i,k,v)}/>
+                      ))}
+                    </div>
+                  )}
+                  {(c.type==="easy"||c.type==="long")&&<div style={{marginBottom:14}}><SF l="총 시간 (분)" v={c.totalMin||40} onChange={v=>upd(i,"totalMin",v)}/></div>}
+                  {c.type!=="rest"&&(
+                    <div style={{marginBottom:8}}>
+                      <div style={{fontSize:S.sm,color:"#666",marginBottom:8}}>목표 페이스 (분:초/km)</div>
+                      <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                        <SF l="최소" v={c.targetPaceMin||""} onChange={v=>upd(i,"targetPaceMin",v)} ph="6:20"/>
+                        <span style={{color:"#555",paddingTop:20,fontSize:S.md}}>~</span>
+                        <SF l="최대" v={c.targetPaceMax||""} onChange={v=>upd(i,"targetPaceMax",v)} ph="6:40"/>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div style={{display:"flex",gap:10,marginTop:18}}>
+          <button onClick={onClose} style={{flex:1,padding:15,borderRadius:10,border:"1px solid #333",background:"none",color:"#777",fontSize:S.md,cursor:"pointer"}}>취소</button>
+          <button onClick={save} style={{flex:2,padding:15,borderRadius:10,border:"none",background:"#E8572A",color:"#fff",fontWeight:700,fontSize:S.md,cursor:"pointer"}}>저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function SF({l,v,onChange,ph}){
+  return(
+    <div>
+      <div style={{fontSize:S.xs,color:"#666",marginBottom:5}}>{l}</div>
+      <input value={v} onChange={e=>onChange(e.target.value)} placeholder={ph||""}
+        style={{width:"100%",background:"#0e0e0e",border:"1px solid #1e1e1e",borderRadius:8,padding:"10px 12px",color:"#e0e0e0",fontSize:S.md,fontFamily:"monospace",outline:"none",boxSizing:"border-box"}}
+        onFocus={e=>e.target.style.borderColor="#E8572A"} onBlur={e=>e.target.style.borderColor="#1e1e1e"}/>
+    </div>
+  );
+}
+
+// ── 주간 내비 ─────────────────────────────────────────────────────────────────
+function WeekNav({off,setOff}){
+  const l=off===0?"이번 주":off===-1?"지난 주":`${Math.abs(off)}주 전`;
+  const d=new Date();d.setDate(d.getDate()-d.getDay()+1+off*7);
+  const mn=d.toLocaleDateString("ko-KR",{month:"short",day:"numeric"});
+  const sn=new Date(d);sn.setDate(sn.getDate()+6);
+  const NB={background:"none",border:"1px solid #2a2a2a",color:"#888",width:40,height:40,borderRadius:8,cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",padding:0};
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+      <button onClick={()=>setOff(o=>o-1)} style={NB}>‹</button>
+      <div style={{flex:1,textAlign:"center"}}>
+        <div style={{fontSize:S.lg,fontWeight:700,color:"#F0F0F0"}}>{l}</div>
+        <div style={{fontSize:S.sm,color:"#666",marginTop:2}}>{mn} – {sn.toLocaleDateString("ko-KR",{month:"short",day:"numeric"})}</div>
+      </div>
+      <button onClick={()=>setOff(o=>Math.min(0,o+1))} style={{...NB,opacity:off>=0?.25:1}} disabled={off>=0}>›</button>
+    </div>
+  );
+}
+
+// ── 앱 루트 ───────────────────────────────────────────────────────────────────
+function App(){
+  const[logData,setLogData]=useState(()=>lsGet(STORAGE_KEY,{}));
+  const[plan,setPlan]=useState(()=>lsGet(PLAN_KEY,DEFAULT_PLAN));
+  const[ghCfg,setGhCfg]=useState(()=>lsGet(GH_KEY,{owner:"RockyMarciano-1",repo:"nsm-tracker",path:"data/log.json",token:""}));
+  const[ghSha,setGhSha]=useState(null);   // 현재 파일 SHA
+  const[off,setOff]=useState(0);
+  const[tab,setTab]=useState("calendar");
+  const[planEdit,setPlanEdit]=useState(false);
+  const[ghModal,setGhModal]=useState(false);
+  const[logModal,setLogModal]=useState(null);
+  const[syncState,setSyncState]=useState("idle"); // idle|syncing|ok|err
+  const[syncMsg,setSyncMsg]=useState("");
+  const[ghSaveStatus,setGhSaveStatus]=useState(null);
+  const wk=weekKey(off);
+
+  // ── 초기 로딩: GitHub에서 데이터 가져오기 ──
+  useEffect(()=>{
+    if(!ghCfg.token||!ghCfg.owner||!ghCfg.repo)return;
+    setSyncState("syncing");setSyncMsg("GitHub에서 데이터 불러오는 중…");
+    ghGet(ghCfg).then(res=>{
+      if(res===null){setSyncState("err");setSyncMsg("GitHub 연결 실패. 설정을 확인하세요.");return;}
+      if(res.data){
+        const merged={...res.data,...lsGet(STORAGE_KEY,{})};
+        setLogData(merged);lsSet(STORAGE_KEY,merged);
+      }
+      if(res.sha)setGhSha(res.sha);
+      setSyncState("ok");setSyncMsg("동기화 완료");
+      setTimeout(()=>setSyncState("idle"),2500);
+    });
+  },[ghCfg.token]);
+
+  // ── 플랜 저장 ──
+  const savePlan=np=>{setPlan(np);lsSet(PLAN_KEY,np)};
+
+  // ── 기록 저장 (localStorage + GitHub) ──
+  const saveLog=async(di,wkk,rec)=>{
+    const next={...logData,[wkk]:{...(logData[wkk]||{}),[di]:rec}};
+    setLogData(next);lsSet(STORAGE_KEY,next);
+    if(!ghCfg.token)return;
+    setSyncState("syncing");setSyncMsg("GitHub에 저장 중…");
+    const res=await ghPut(ghCfg,next,ghSha);
+    if(res.ok){if(res.sha)setGhSha(res.sha);setSyncState("ok");setSyncMsg("GitHub 저장 완료");}
+    else{setSyncState("err");setSyncMsg("GitHub 저장 실패: "+res.msg);}
+    setTimeout(()=>setSyncState("idle"),3000);
+  };
+
+  // ── GitHub 설정 저장 + 연결 테스트 ──
+  const saveGhCfg=async(cfg)=>{
+    lsSet(GH_KEY,cfg);setGhCfg(cfg);
+    setGhSaveStatus(null);
+    const res=await ghGet(cfg);
+    if(res===null){setGhSaveStatus({ok:false,msg:"연결 실패. Token·저장소명을 확인하세요."});return;}
+    setGhSaveStatus({ok:true,msg:"연결 성공! 이제 기록이 자동 저장됩니다."});
+    if(res.sha)setGhSha(res.sha);
+    if(res.data){const merged={...res.data,...lsGet(STORAGE_KEY,{})};setLogData(merged);lsSet(STORAGE_KEY,merged);}
+  };
+
+  const openLog=(di,wkk)=>setLogModal({di,wk:wkk});
+
+  // ── 동기화 상태 표시 ──
+  const syncColor=syncState==="ok"?"#3DBFA0":syncState==="err"?"#E8572A":syncState==="syncing"?"#5BA4CF":"transparent";
+  const syncIcon=syncState==="ok"?"✅":syncState==="err"?"❌":syncState==="syncing"?"⟳":"";
+
+  return(
+    <div style={{minHeight:"100vh",background:"#0A0A0A",color:"#E0E0E0",fontFamily:"'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif",maxWidth:480,margin:"0 auto",paddingBottom:80}}>
+
+      {/* 헤더 */}
+      <div style={{padding:"22px 18px 12px",borderBottom:"1px solid #1a1a1a",position:"sticky",top:0,zIndex:20,background:"#0A0A0A"}}>
+        <div style={{fontSize:S.xs,letterSpacing:4,color:"#E8572A",marginBottom:4,fontFamily:"monospace"}}>NORWEGIAN SINGLES METHOD</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+          <div style={{fontSize:S.xl,fontWeight:700,letterSpacing:0.5}}>런닝 트레이닝 로그</div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {/* GitHub 상태 표시 */}
+            <button onClick={()=>setGhModal(true)} style={{
+              background:"none",border:`1px solid ${ghCfg.token?"#1E8A6E":"#2a2a2a"}`,
+              color:ghCfg.token?"#3DBFA0":"#666",
+              padding:"6px 10px",borderRadius:8,cursor:"pointer",fontSize:S.xs,
+              display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",
+            }}>
+              {ghCfg.token?"☁ 연결됨":"☁ GitHub"}
+            </button>
+            <button onClick={()=>setPlanEdit(true)} style={{background:"none",border:"1px solid #2a2a2a",color:"#888",padding:"6px 10px",borderRadius:8,cursor:"pointer",fontSize:S.xs}}>플랜 편집</button>
+          </div>
+        </div>
+        {/* 동기화 상태 바 */}
+        {syncState!=="idle"&&(
+          <div style={{marginTop:8,fontSize:S.xs,color:syncColor,display:"flex",alignItems:"center",gap:6}}>
+            <span style={{animation:syncState==="syncing"?"spin 1s linear infinite":"none"}}>{syncIcon}</span>
+            {syncMsg}
+          </div>
+        )}
+      </div>
+
+      {/* 탭 */}
+      <div style={{display:"flex",borderBottom:"1px solid #1a1a1a"}}>
+        {[["calendar","📅  캘린더"],["week","📋  주간 목록"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"14px 0",background:"none",border:"none",color:tab===k?"#E8572A":"#555",borderBottom:`2px solid ${tab===k?"#E8572A":"transparent"}`,fontSize:S.md,cursor:"pointer",fontFamily:"inherit"}}>{l}</button>
+        ))}
+      </div>
+
+      <div style={{padding:"18px 16px"}}>
+        {tab==="calendar"&&<CalView plan={plan} logData={logData} onLog={openLog}/>}
+        {tab==="week"&&(
+          <>
+            <WeekNav off={off} setOff={setOff}/>
+            <WeekView plan={plan} logData={logData} onLog={i=>openLog(i,wk)} wk={wk}/>
+          </>
+        )}
+      </div>
+
+      {logModal&&<LogModal pi={plan[logModal.di]} di={logModal.di} wk={logModal.wk} logData={logData} onSave={saveLog} onClose={()=>setLogModal(null)}/>}
+      {planEdit&&<PlanModal plan={plan} onSave={savePlan} onClose={()=>setPlanEdit(false)}/>}
+      {ghModal&&<GhModal cfg={ghCfg} onSave={saveGhCfg} onClose={()=>{setGhModal(false);setGhSaveStatus(null)}} status={ghSaveStatus}/>}
+
+      {/* 하단 바 */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,padding:"13px 18px",background:"#0A0A0A",borderTop:"1px solid #1a1a1a",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:S.xs,color:"#333"}}>날짜 탭 → 결과 기록</span>
+        {ghCfg.token&&<span style={{fontSize:S.xs,color:"#1E8A6E"}}>☁ 자동 저장 중</span>}
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+<style>
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</body>
+</html>
